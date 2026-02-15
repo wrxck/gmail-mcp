@@ -39,12 +39,12 @@ cd gmail-mcp
 mvn clean package
 ```
 
-This produces a single uber-jar at `target/gmail-mcp-1.0.0.jar`.
+This produces a single uber-jar at `target/gmail-mcp-1.1.0.jar`.
 
 ### 3. Authenticate
 
 ```bash
-java -jar target/gmail-mcp-1.0.0.jar --auth
+java -jar target/gmail-mcp-1.1.0.jar --auth
 ```
 
 This opens your browser for Google OAuth consent. After authorizing, credentials are saved to `~/.gmail-mcp/tokens/` and automatically refreshed on expiry. You only need to do this once.
@@ -53,7 +53,7 @@ This opens your browser for Google OAuth consent. After authorizing, credentials
 
 ```bash
 claude mcp add --scope user --transport stdio gmail -- \
-  java -jar /path/to/gmail-mcp-1.0.0.jar
+  java -jar /path/to/gmail-mcp-1.1.0.jar
 ```
 
 Restart Claude Code. The 4 Gmail tools will be available immediately.
@@ -67,6 +67,15 @@ Once registered, you can ask Claude:
 - "Read email `<message-id>`"
 - "What labels do I have?"
 - "Find unread emails in my inbox from this week"
+
+## Security
+
+Email content is untrusted third-party data that gets returned directly into an LLM's context. A malicious email could contain text designed to manipulate the agent into taking unintended actions. This server applies defense-in-depth mitigations:
+
+- **Random content boundaries** — Each tool response generates a cryptographically random boundary string (via `SecureRandom`). Untrusted fields (`from`, `subject`, `snippet`, `body`) are wrapped with this boundary so the LLM can distinguish email data from system structure. Since the boundary is unpredictable, an attacker cannot embed it in their email to escape the content region.
+- **Security context preamble** — Every email tool response includes a leading text block explaining the boundary token and instructing the LLM to treat bounded content as data only.
+- **Tool description warnings** — The `list_emails`, `read_email`, and `search_emails` tool descriptions explicitly warn that returned content is untrusted.
+- **Body truncation** — Email bodies exceeding 50,000 characters are truncated with a `[TRUNCATED]` indicator to prevent oversized payloads from overwhelming context.
 
 ## Architecture
 
@@ -99,20 +108,27 @@ Credentials are stored in `~/.gmail-mcp/` with restricted permissions (`rwx-----
 # Build
 mvn clean package
 
+# Run tests
+mvn test
+
 # Run auth flow
-java -jar target/gmail-mcp-1.0.0.jar --auth
+java -jar target/gmail-mcp-1.1.0.jar --auth
 
 # Run server (blocks on stdio — use with Claude Code or an MCP client)
-java -jar target/gmail-mcp-1.0.0.jar
+java -jar target/gmail-mcp-1.1.0.jar
 ```
 
 ### Project structure
 
 ```
 src/main/java/com/gmail/mcp/
-  GmailMcpServer.java   # Main class, MCP tool definitions
-  GmailAuth.java         # OAuth flow, credential management
-  GmailClient.java       # Gmail API wrapper
+  GmailMcpServer.java    # Main class, MCP tool definitions
+  GmailAuth.java          # OAuth flow, credential management
+  GmailClient.java        # Gmail API wrapper
+  ContentSanitizer.java   # Prompt injection mitigations
+
+src/test/java/com/gmail/mcp/
+  ContentSanitizerTest.java
 ```
 
 ## License
