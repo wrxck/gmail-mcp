@@ -9,6 +9,7 @@ import com.google.api.services.gmail.model.ListLabelsResponse;
 import com.google.api.services.gmail.model.ListMessagesResponse;
 import com.google.api.services.gmail.model.Message;
 import com.google.api.services.gmail.model.MessagePart;
+import com.google.api.services.gmail.model.MessagePartBody;
 import com.google.api.services.gmail.model.MessagePartHeader;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -17,6 +18,9 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
@@ -27,9 +31,19 @@ import java.util.Set;
 
 public class GmailClient {
 
+    record AttachmentInfo(int index, String filename, String mimeType, int sizeBytes, MessagePart part) {}
+
+    sealed interface AttachmentResult permits TextAttachmentResult, ImageAttachmentResult, SavedFileAttachmentResult {
+        String messageId(); int index(); String filename(); String mimeType(); int sizeBytes();
+    }
+    record TextAttachmentResult(String messageId, int index, String filename, String mimeType, int sizeBytes, String content) implements AttachmentResult {}
+    record ImageAttachmentResult(String messageId, int index, String filename, String mimeType, int sizeBytes, String base64Data) implements AttachmentResult {}
+    record SavedFileAttachmentResult(String messageId, int index, String filename, String mimeType, int sizeBytes, String filePath) implements AttachmentResult {}
+
     private static final Logger log = LoggerFactory.getLogger(GmailClient.class);
     private static final Set<String> METADATA_HEADERS = Set.of("From", "To", "Subject", "Date");
     private static final int MAX_RESULTS_LIMIT = 100;
+    private static final int MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
     private final Gmail service;
 
@@ -112,6 +126,20 @@ public class GmailClient {
             result.put("labels", message.getLabelIds());
         }
 
+        List<AttachmentInfo> attachments = extractAttachments(message.getPayload());
+        if (!attachments.isEmpty()) {
+            List<Map<String, Object>> attachmentList = new ArrayList<>();
+            for (AttachmentInfo att : attachments) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("index", att.index());
+                entry.put("filename", att.filename());
+                entry.put("mimeType", att.mimeType());
+                entry.put("sizeBytes", att.sizeBytes());
+                attachmentList.add(entry);
+            }
+            result.put("attachments", attachmentList);
+        }
+
         return result;
     }
 
@@ -137,7 +165,132 @@ public class GmailClient {
         return results;
     }
 
-    private String extractBody(MessagePart part) {
+    List<AttachmentInfo> extractAttachments(MessagePart root) {
+        List<AttachmentInfo> attachments = new ArrayList<>();
+        collectAttachments(root, attachments);
+        return attachments;
+    }
+
+    private void collectAttachments(MessagePart part, List<AttachmentInfo> result) {
+        if (part == null) {
+            return;
+        }
+
+        String filename = part.getFilename();
+        if (filename != null && !filename.isEmpty()) {
+            int size = 0;
+            if (part.getBody() != null && part.getBody().getSize() != null) {
+                size = part.getBody().getSize();
+            }
+            result.add(new AttachmentInfo(
+                    result.size(), filename, part.getMimeType(), size, part));
+        }
+
+        if (part.getParts() != null) {
+            for (MessagePart child : part.getParts()) {
+                collectAttachments(child, result);
+            }
+        }
+    }
+
+    public AttachmentResult getAttachmentContent(String messageId, int attachmentIndex, Path attachmentsBaseDir) throws IOException {
+        if (messageId.contains("/") || messageId.contains("\\") || messageId.contains("..")) {
+            throw new IllegalArgumentException("Invalid messageId");
+        }
+
+        Message message = service.users().messages().get("me", messageId)
+                .setFormat("full")
+                .execute();
+
+        List<AttachmentInfo> attachments = extractAttachments(message.getPayload());
+        if (attachmentIndex < 0 || attachmentIndex >= attachments.size()) {
+            throw new IllegalArgumentException(
+                    "Attachment index " + attachmentIndex + " out of range (0-" + (attachments.size() - 1) + ")");
+        }
+
+        AttachmentInfo att = attachments.get(attachmentIndex);
+
+        if (att.mimeType().startsWith("text/")) {
+            byte[] bytes = fetchAttachmentBytes(messageId, att);
+            String data = bytes != null ? new String(bytes, StandardCharsets.UTF_8) : "";
+            if ("text/html".equals(att.mimeType())) {
+                data = stripHtml(data);
+            }
+            if (data.length() > ContentSanitizer.MAX_ATTACHMENT_LENGTH) {
+                data = data.substring(0, ContentSanitizer.MAX_ATTACHMENT_LENGTH) + "\n[TRUNCATED]";
+            }
+            return new TextAttachmentResult(messageId, att.index(), att.filename(), att.mimeType(), att.sizeBytes(), data);
+        }
+
+        if (att.mimeType().startsWith("image/") && att.sizeBytes() <= MAX_IMAGE_SIZE_BYTES) {
+            byte[] bytes = fetchAttachmentBytes(messageId, att);
+            if (bytes != null) {
+                String base64Data = Base64.getEncoder().encodeToString(bytes);
+                return new ImageAttachmentResult(messageId, att.index(), att.filename(), att.mimeType(), att.sizeBytes(), base64Data);
+            }
+        }
+
+        byte[] bytes = fetchAttachmentBytes(messageId, att);
+        if (bytes == null) {
+            bytes = new byte[0];
+        }
+
+        String safeFilename = sanitizeFilename(att.filename());
+        Path messageDir = attachmentsBaseDir.resolve(messageId);
+        Files.createDirectories(messageDir);
+
+        try {
+            Set<PosixFilePermission> ownerOnly = Set.of(
+                    PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE);
+            Files.setPosixFilePermissions(attachmentsBaseDir, ownerOnly);
+        } catch (UnsupportedOperationException ignored) {
+            // Non-POSIX filesystem (e.g., Windows)
+        }
+
+        Path filePath = messageDir.resolve(safeFilename);
+        Files.write(filePath, bytes);
+
+        return new SavedFileAttachmentResult(messageId, att.index(), att.filename(), att.mimeType(), att.sizeBytes(), filePath.toString());
+    }
+
+    private byte[] fetchAttachmentBytes(String messageId, AttachmentInfo att) throws IOException {
+        MessagePartBody body = att.part().getBody();
+        if (body != null && body.getData() != null) {
+            return Base64.getUrlDecoder().decode(body.getData());
+        }
+        if (body != null && body.getAttachmentId() != null) {
+            MessagePartBody fetched = service.users().messages().attachments()
+                    .get("me", messageId, body.getAttachmentId())
+                    .execute();
+            if (fetched.getData() != null) {
+                return Base64.getUrlDecoder().decode(fetched.getData());
+            }
+        }
+        return null;
+    }
+
+    static String sanitizeFilename(String filename) {
+        if (filename == null || filename.isBlank()) {
+            return "attachment";
+        }
+        int lastSlash = Math.max(filename.lastIndexOf('/'), filename.lastIndexOf('\\'));
+        if (lastSlash >= 0) {
+            filename = filename.substring(lastSlash + 1);
+        }
+        while (filename.startsWith(".")) {
+            filename = filename.substring(1);
+        }
+        filename = filename.replaceAll("[^a-zA-Z0-9._-]", "_");
+        if (filename.length() > 200) {
+            filename = filename.substring(0, 200);
+        }
+        if (filename.isEmpty()) {
+            return "attachment";
+        }
+        return filename;
+    }
+
+    String extractBody(MessagePart part) {
         if (part == null) {
             return null;
         }
@@ -155,7 +308,7 @@ public class GmailClient {
         return null;
     }
 
-    private String findBodyByMimeType(MessagePart part, String targetMimeType) {
+    String findBodyByMimeType(MessagePart part, String targetMimeType) {
         if (part == null) {
             return null;
         }
@@ -177,11 +330,11 @@ public class GmailClient {
         return null;
     }
 
-    private String decodeBase64Url(String data) {
+    String decodeBase64Url(String data) {
         return new String(Base64.getUrlDecoder().decode(data), StandardCharsets.UTF_8);
     }
 
-    private String stripHtml(String html) {
+    String stripHtml(String html) {
         Document doc = Jsoup.parse(html);
         doc.outputSettings().prettyPrint(false);
         doc.select("br").after("\n");
