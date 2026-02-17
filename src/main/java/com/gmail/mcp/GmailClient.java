@@ -37,7 +37,7 @@ public class GmailClient {
         String messageId(); int index(); String filename(); String mimeType(); int sizeBytes();
     }
     record TextAttachmentResult(String messageId, int index, String filename, String mimeType, int sizeBytes, String content) implements AttachmentResult {}
-    record ImageAttachmentResult(String messageId, int index, String filename, String mimeType, int sizeBytes, String base64Data) implements AttachmentResult {}
+    record ImageAttachmentResult(String messageId, int index, String filename, String mimeType, int sizeBytes, String base64Data, String filePath) implements AttachmentResult {}
     record SavedFileAttachmentResult(String messageId, int index, String filename, String mimeType, int sizeBytes, String filePath) implements AttachmentResult {}
 
     private static final Logger log = LoggerFactory.getLogger(GmailClient.class);
@@ -222,35 +222,19 @@ public class GmailClient {
             return new TextAttachmentResult(messageId, att.index(), att.filename(), att.mimeType(), att.sizeBytes(), data);
         }
 
-        if (att.mimeType().startsWith("image/") && att.sizeBytes() <= MAX_IMAGE_SIZE_BYTES) {
-            byte[] bytes = fetchAttachmentBytes(messageId, att);
-            if (bytes != null) {
-                String base64Data = Base64.getEncoder().encodeToString(bytes);
-                return new ImageAttachmentResult(messageId, att.index(), att.filename(), att.mimeType(), att.sizeBytes(), base64Data);
-            }
-        }
-
         byte[] bytes = fetchAttachmentBytes(messageId, att);
         if (bytes == null) {
             bytes = new byte[0];
         }
 
-        String safeFilename = sanitizeFilename(att.filename());
-        Path messageDir = attachmentsBaseDir.resolve(messageId);
-        Files.createDirectories(messageDir);
+        String savedPath = saveAttachmentToDisk(bytes, messageId, att.filename(), attachmentsBaseDir);
 
-        try {
-            Set<PosixFilePermission> ownerOnly = Set.of(
-                    PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE);
-            Files.setPosixFilePermissions(attachmentsBaseDir, ownerOnly);
-        } catch (UnsupportedOperationException ignored) {
-            // Non-POSIX filesystem (e.g., Windows)
+        if (att.mimeType().startsWith("image/") && att.sizeBytes() <= MAX_IMAGE_SIZE_BYTES && bytes.length > 0) {
+            String base64Data = Base64.getEncoder().encodeToString(bytes);
+            return new ImageAttachmentResult(messageId, att.index(), att.filename(), att.mimeType(), att.sizeBytes(), base64Data, savedPath);
         }
 
-        Path filePath = messageDir.resolve(safeFilename);
-        Files.write(filePath, bytes);
-
-        return new SavedFileAttachmentResult(messageId, att.index(), att.filename(), att.mimeType(), att.sizeBytes(), filePath.toString());
+        return new SavedFileAttachmentResult(messageId, att.index(), att.filename(), att.mimeType(), att.sizeBytes(), savedPath);
     }
 
     private byte[] fetchAttachmentBytes(String messageId, AttachmentInfo att) throws IOException {
@@ -267,6 +251,35 @@ public class GmailClient {
             }
         }
         return null;
+    }
+
+    private String saveAttachmentToDisk(byte[] bytes, String messageId, String filename, Path attachmentsBaseDir) throws IOException {
+        String safeFilename = sanitizeFilename(filename);
+        Path messageDir = attachmentsBaseDir.resolve(messageId);
+        Files.createDirectories(messageDir);
+
+        try {
+            Set<PosixFilePermission> dirPerms = Set.of(
+                    PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE);
+            Files.setPosixFilePermissions(attachmentsBaseDir, dirPerms);
+            Files.setPosixFilePermissions(messageDir, dirPerms);
+        } catch (UnsupportedOperationException ignored) {
+            // Non-POSIX filesystem (e.g., Windows)
+        }
+
+        Path filePath = messageDir.resolve(safeFilename);
+        // Remove existing read-only file before overwrite
+        Files.deleteIfExists(filePath);
+        Files.write(filePath, bytes);
+
+        try {
+            Set<PosixFilePermission> readOnly = Set.of(PosixFilePermission.OWNER_READ);
+            Files.setPosixFilePermissions(filePath, readOnly);
+        } catch (UnsupportedOperationException ignored) {
+            // Non-POSIX filesystem
+        }
+
+        return filePath.toString();
     }
 
     static String sanitizeFilename(String filename) {

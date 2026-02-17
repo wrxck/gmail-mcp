@@ -46,12 +46,12 @@ cd gmail-mcp
 mvn clean package
 ```
 
-This produces a single uber-jar at `target/gmail-mcp-1.2.0.jar`.
+This produces a single uber-jar at `target/gmail-mcp-1.3.0.jar`.
 
 ### 3. Authenticate
 
 ```bash
-java -jar target/gmail-mcp-1.2.0.jar --auth
+java -jar target/gmail-mcp-1.3.0.jar --auth
 ```
 
 This opens your browser for Google OAuth consent. After authorizing, credentials are saved to `~/.gmail-mcp/tokens/` and automatically refreshed on expiry. You only need to do this once.
@@ -60,7 +60,7 @@ This opens your browser for Google OAuth consent. After authorizing, credentials
 
 ```bash
 claude mcp add --scope user --transport stdio gmail -- \
-  java -jar /path/to/gmail-mcp-1.2.0.jar
+  java -jar /path/to/gmail-mcp-1.3.0.jar
 ```
 
 Restart Claude Code. The 4 Gmail tools will be available immediately.
@@ -123,10 +123,10 @@ mvn clean package
 mvn test
 
 # Run auth flow
-java -jar target/gmail-mcp-1.2.0.jar --auth
+java -jar target/gmail-mcp-1.3.0.jar --auth
 
 # Run server (blocks on stdio — use with Claude Code or an MCP client)
-java -jar target/gmail-mcp-1.2.0.jar
+java -jar target/gmail-mcp-1.3.0.jar
 ```
 
 ### Project structure
