@@ -259,15 +259,26 @@ public class GmailClient {
         Files.createDirectories(messageDir);
 
         try {
-            Set<PosixFilePermission> ownerOnly = Set.of(
+            Set<PosixFilePermission> dirPerms = Set.of(
                     PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE);
-            Files.setPosixFilePermissions(attachmentsBaseDir, ownerOnly);
+            Files.setPosixFilePermissions(attachmentsBaseDir, dirPerms);
+            Files.setPosixFilePermissions(messageDir, dirPerms);
         } catch (UnsupportedOperationException ignored) {
             // Non-POSIX filesystem (e.g., Windows)
         }
 
         Path filePath = messageDir.resolve(safeFilename);
+        // Remove existing read-only file before overwrite
+        Files.deleteIfExists(filePath);
         Files.write(filePath, bytes);
+
+        try {
+            Set<PosixFilePermission> readOnly = Set.of(PosixFilePermission.OWNER_READ);
+            Files.setPosixFilePermissions(filePath, readOnly);
+        } catch (UnsupportedOperationException ignored) {
+            // Non-POSIX filesystem
+        }
+
         return filePath.toString();
     }
 
