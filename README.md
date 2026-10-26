@@ -65,6 +65,35 @@ claude mcp add --scope user --transport stdio gmail -- \
 
 Restart Claude Code. The 4 Gmail tools will be available immediately.
 
+### Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--auth` | Run the OAuth browser flow and exit | |
+| `--transport` | `stdio` (one client) or `http` (one shared server for many clients) | `stdio` |
+| `--bind` | Address for `http` | `127.0.0.1` |
+| `--port` | Port for `http` | `7404` |
+| `--auth-token-file` | File with the bearer token; required for `http` | |
+
+### Shared HTTP server
+
+By default each Claude session starts its own copy of the server. With `--transport http`, one copy serves every session over MCP streamable HTTP at `/mcp`. The server still reads the OAuth credential from `~/.gmail-mcp/` of the user that runs it.
+
+```bash
+java -jar target/gmail-mcp-1.3.0.jar \
+  --transport http --port 7404 --auth-token-file /run/credentials/mcp-gmail.service/token
+```
+
+Every request must send `Authorization: Bearer <token>`. The server refuses to start if the token file is readable by every user, or if the token has fewer than 32 characters. Register it in Claude Code with a `headersHelper` that prints the header:
+
+```json
+"gmail": {
+  "type": "http",
+  "url": "http://127.0.0.1:7404/mcp",
+  "headersHelper": "/usr/local/bin/mcp-auth-header gmail"
+}
+```
+
 ## Usage examples
 
 Once registered, you can ask Claude:
@@ -83,6 +112,7 @@ Email content is untrusted third-party data that gets returned directly into an 
 - **Security context preamble** — Every email tool response includes a leading text block explaining the boundary token and instructing the LLM to treat bounded content as data only.
 - **Tool description warnings** — The `list_emails`, `read_email`, `search_emails`, and `get_attachment` tool descriptions explicitly warn that returned content is untrusted.
 - **Body truncation** — Email bodies exceeding 50,000 characters are truncated with a `[TRUNCATED]` indicator to prevent oversized payloads from overwhelming context. Attachment content is truncated at 100,000 characters.
+- **HTTP auth** — In `http` mode, every request needs the bearer token. The compare is constant-time. Bind to `127.0.0.1` only; containers on the host network can reach loopback, and the token is what keeps them out.
 - **Typed attachment handling** — `text/*` attachments return decoded content inline. `image/*` attachments (up to 10 MB) are returned as `ImageContent` for vision analysis. All other binary attachments are saved to `~/.gmail-mcp/attachments/` with sanitized filenames, and the file path is returned. Filenames from emails are sanitized to prevent path traversal attacks.
 
 ## Architecture
@@ -95,7 +125,7 @@ Claude Code  <--stdio (JSON-RPC)-->  gmail-mcp.jar  <--HTTPS-->  Gmail API
                                       tokens/StoredCredential
 ```
 
-- **Transport**: stdio (Claude Code spawns the server as a subprocess)
+- **Transport**: stdio by default (Claude Code spawns the server as a subprocess), or `--transport http` for one shared server at `/mcp` on embedded Jetty 12
 - **OAuth**: `GoogleAuthorizationCodeFlow` with `FileDataStoreFactory` handles token persistence and automatic refresh
 - **Logging**: All logs go to stderr (stdout is reserved for MCP JSON-RPC)
 
@@ -137,12 +167,16 @@ src/main/java/com/gmail/mcp/
   GmailAuth.java          # OAuth flow, credential management
   GmailClient.java        # Gmail API wrapper
   ContentSanitizer.java   # Prompt injection mitigations
+  TransportConfig.java    # --transport, --bind, --port, --auth-token-file
+  HttpTransportServer.java # Streamable HTTP server with bearer-token filter
 
 src/test/java/com/gmail/mcp/
   ContentSanitizerTest.java    # Boundary wrapping, truncation, sanitization
   ResponsePipelineTest.java    # End-to-end response pipeline (email vs label tools)
   GmailClientTest.java         # HTML stripping, base64 decoding, body extraction
   GmailMcpServerTest.java      # Argument parsing
+  TransportConfigTest.java     # Transport flags, token file checks
+  HttpTransportServerTest.java # Bearer auth and the /mcp endpoint
 ```
 
 ## License
