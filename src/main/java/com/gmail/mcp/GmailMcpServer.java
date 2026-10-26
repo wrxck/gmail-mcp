@@ -23,6 +23,8 @@ public class GmailMcpServer {
 
     private static final Logger log = LoggerFactory.getLogger(GmailMcpServer.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final String SERVER_NAME = "gmail";
+    private static final String SERVER_VERSION = "1.3.0";
     private static final int DEFAULT_MAX_RESULTS = 10;
     private static final Path ATTACHMENTS_DIR = Path.of(System.getProperty("user.home"), ".gmail-mcp", "attachments");
 
@@ -38,28 +40,54 @@ public class GmailMcpServer {
             var client = new GmailClient(
                     credential, GmailAuth.getHttpTransport(), GmailAuth.getJsonFactory());
 
-            startServer(client);
+            List<McpServerFeatures.SyncToolSpecification> tools = buildTools(client);
+            TransportConfig transport = TransportConfig.fromArgs(args);
+            if (transport.http()) {
+                startHttpServer(tools, transport);
+            } else {
+                startServer(tools);
+            }
         } catch (Exception e) {
             log.error("Failed to start Gmail MCP server", e);
             System.exit(1);
         }
     }
 
-    private static void startServer(GmailClient client) {
+    // one list keeps the stdio and http servers in step
+    static List<McpServerFeatures.SyncToolSpecification> buildTools(GmailClient client) {
+        return List.of(
+                buildListEmailsTool(client),
+                buildReadEmailTool(client),
+                buildSearchEmailsTool(client),
+                buildListLabelsTool(client),
+                buildGetAttachmentTool(client));
+    }
+
+    private static void startHttpServer(List<McpServerFeatures.SyncToolSpecification> tools,
+                                        TransportConfig transport) throws Exception {
+        HttpTransportServer server = HttpTransportServer.start(SERVER_NAME, SERVER_VERSION, tools,
+                transport.bindHost(), transport.port(), transport.readToken());
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            log.info("Shutting down Gmail MCP server");
+            try {
+                server.stop();
+            } catch (Exception e) {
+                log.warn("Error during shutdown: {}", e.getMessage());
+            }
+        }));
+        server.join();
+    }
+
+    private static void startServer(List<McpServerFeatures.SyncToolSpecification> tools) {
         var transport = new StdioServerTransportProvider(
                 new JacksonMcpJsonMapper(OBJECT_MAPPER));
 
         McpSyncServer server = McpServer.sync(transport)
-                .serverInfo("gmail", "1.3.0")
+                .serverInfo(SERVER_NAME, SERVER_VERSION)
                 .capabilities(ServerCapabilities.builder()
                         .tools(true)
                         .build())
-                .tools(
-                        buildListEmailsTool(client),
-                        buildReadEmailTool(client),
-                        buildSearchEmailsTool(client),
-                        buildListLabelsTool(client),
-                        buildGetAttachmentTool(client))
+                .tools(tools)
                 .build();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {

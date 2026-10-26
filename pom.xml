@@ -53,6 +53,13 @@
             <artifactId>mcp</artifactId>
         </dependency>
 
+        <!-- jetty lets one shared server answer many sessions over http -->
+        <dependency>
+            <groupId>org.eclipse.jetty.ee10</groupId>
+            <artifactId>jetty-ee10-servlet</artifactId>
+            <version>12.1.14</version>
+        </dependency>
+
         <!-- Gmail API -->
         <dependency>
             <groupId>com.google.apis</groupId>
